@@ -4,8 +4,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="csrf-token" content="{{ csrf_token }}">
   <title>DECA Practice Lab</title>
-  <script>
+  <script nonce="{{ csp_nonce }}">
     (function () {
       // Default performance mode ON unless explicitly disabled
       try {
@@ -29,15 +30,23 @@
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap"
     rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-  <script src="https://unpkg.com/@phosphor-icons/web"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+  <script src="https://unpkg.com/@phosphor-icons/web@2.1.0"
+    integrity="sha384-n16c/nx4F+lhirj8MGvRow9aJL9GbCyTdfN4uP7hoEKny6V1lFxkuoX7U42vN7Ob"
+    crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"
+    integrity="sha384-NrKB+u6Ts6AtkIhwPixiKTzgSKNblyhlk0Sohlgar9UHUBzai/sgnNNWWd291xqt"
+    crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"
+    integrity="sha384-Rv68Y7adOjMMJc1/xFMcdNvXre/HF51to4GZjBALmXr7ABnVl5V4UajJwBu7zbhN"
+    crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"
+    integrity="sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e"
+    crossorigin="anonymous"></script>
   <link rel="icon" type="image/png" sizes="any" href="{{ url_for('static', filename='favicon.png') }}">
 </head>
 
 <body>
-  <script>
+  <script nonce="{{ csp_nonce }}">
     window.DEFAULT_RANDOM_ORDER = {{ "true" if default_random_order else "false" }};
   </script>
   <div class="bg-grid"></div>
@@ -53,13 +62,13 @@
     </div>
     <div class="topbar-actions">
 
-      <button class="btn-nav" onclick="openCredits()">
+      <button class="btn-nav" id="open-credits-btn">
         <i class="ph ph-info"></i> About
       </button>
-      <button class="btn-nav" onclick="openHistory()">
+      <button class="btn-nav" id="open-history-btn">
         <i class="ph ph-clock-counter-clockwise"></i> History
       </button>
-      <button class="btn-nav" onclick="openSettings()">
+      <button class="btn-nav" id="open-settings-btn">
         <i class="ph ph-gear"></i> Settings
       </button>
     </div>
@@ -86,7 +95,7 @@
           <i class="ph ph-plus-circle"></i>
           <span>Add new tests</span>
         </div>
-        <p>Upload a DECA PDF to practice privately. Files stay in your browser session only.</p>
+        <p>Upload a DECA PDF to practice privately. Files are saved in your browser storage for offline use and can be cleared from app history/settings.</p>
         <input type="file" id="pdf-upload-input" accept="application/pdf" style="display:none">
         <button id="pdf-upload-btn" class="secondary" type="button">
           <i class="ph ph-upload"></i> Upload PDF
@@ -164,7 +173,7 @@
           <button id="show-all-explanations" class="secondary">
             <i class="ph ph-list-magnifying-glass"></i> Explanations
           </button>
-          <button id="back-to-home-summ" class="ghost" onclick="resetState()">
+          <button id="back-to-home-summ" class="ghost">
             <i class="ph ph-caret-left"></i> Home
           </button>
         </div>
@@ -177,7 +186,7 @@
   </main>
 
   <footer style="margin-top: 40px; text-align: center; display: flex; justify-content: center; padding-bottom: 20px;">
-    <a href="https://forms.gle/w9S2fBW5gCmkF3UQ6" target="_blank" class="muted small"
+    <a href="https://forms.gle/w9S2fBW5gCmkF3UQ6" target="_blank" rel="noopener noreferrer" class="muted small"
       style="text-decoration: underline; display: flex; align-items: center; gap: 6px; opacity: 0.7; transition: opacity 0.2s;">
       <i class="ph ph-chat-text"></i> Suggestions / Concerns?
     </a>
@@ -195,7 +204,7 @@
             <p class="subtitle">Customize your practice lab experience.</p>
           </div>
         </div>
-        <button class="btn-nav" onclick="closeSettings()" aria-label="Close Settings">
+        <button class="btn-nav" id="close-settings-btn" aria-label="Close Settings">
           <i class="ph ph-x"></i> Close
         </button>
       </header>
@@ -341,7 +350,7 @@
             <h4>About</h4>
             <p class="muted">About this project</p>
           </div>
-          <button class="btn-icon" onclick="closeCredits()" aria-label="Close about dialog">
+          <button class="btn-icon close-credits-btn" aria-label="Close about dialog">
             <i class="ph ph-x"></i>
           </button>
         </div>
@@ -372,7 +381,7 @@
 
           <div style="margin-top: 2rem;">
             <p class="muted small">Built for the DECA community.</p>
-            <button class="primary" onclick="closeCredits()" style="margin-top: 16px;">
+            <button class="primary close-credits-btn" style="margin-top: 16px;">
               Let's Practice
             </button>
           </div>
@@ -393,7 +402,7 @@
             <h4>History</h4>
             <p class="muted">Your past sessions (last 7 days)</p>
           </div>
-          <button class="btn-icon" onclick="closeHistory()" aria-label="Close history">
+          <button class="btn-icon" id="close-history-btn" aria-label="Close history">
             <i class="ph ph-x"></i>
           </button>
         </div>
@@ -409,7 +418,7 @@
       </div>
 
       <div style="padding: 16px; border-top: 1px solid var(--card-border); text-align: right;">
-        <button class="ghost text-danger small-btn" onclick="clearHistory()">
+        <button class="ghost text-danger small-btn" id="clear-history-btn">
           Clear All
         </button>
       </div>

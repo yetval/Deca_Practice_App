@@ -1,5 +1,6 @@
 .git
 .gitignore
+.github
 __pycache__/
 *.py[cod]
 *.log
@@ -8,3 +9,11 @@ env/
 venv/
 /.mypy_cache
 /.pytest_cache
+instance/
+tests/
+*.pdf
+*.db
+.env
+.env.*
+README.md
+CHANGELOG.md

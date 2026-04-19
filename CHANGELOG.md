@@ -14,7 +14,7 @@ All notable changes to this project will be documented in this file.
 ### 🐛 Bug Fixes
 - Fixed PDF parsing issues for multi-column layouts and footer text merging.
 - Fixed 54+ specific test files to ensure accurate question counts and option parsing.
-- Fixed `SECRET_KEY` crash in production by implementing auto-generation.
+- Fixed `SECRET_KEY` startup handling in production by requiring explicit configuration.
 - Fixed session storage on read-only filesystems (fallback to `/tmp`).
 - Fixed "undefined" correct answer bug in explanations.
 

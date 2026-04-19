@@ -10,6 +10,7 @@ import concurrent.futures
 import time
 import sqlite3
 import copy
+import secrets
 from pathlib import Path
 
 from typing import Dict, List, Any, Optional, IO
@@ -17,6 +18,7 @@ from typing import Dict, List, Any, Optional, IO
 from flask import Flask, jsonify, render_template, request, abort, redirect, url_for, session
 from pypdf import PdfReader
 from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 # --- Logging Configuration ---
 import logging
@@ -60,18 +62,17 @@ MAX_QUESTIONS_PER_RUN = int(os.getenv("MAX_QUESTIONS_PER_RUN", "100"))
 MAX_TIME_LIMIT_MINUTES = int(os.getenv("MAX_TIME_LIMIT_MINUTES", "1440"))
 DEFAULT_RANDOM_ORDER = os.getenv("DEFAULT_RANDOM_ORDER", "false").lower() in {"1", "true", "yes", "on"}
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", "12582912"))
+MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "150"))
+PDF_PAGE_TIMEOUT_SECONDS = int(os.getenv("PDF_PAGE_TIMEOUT_SECONDS", "8"))
+TRUSTED_PROXY_HOPS = max(int(os.getenv("TRUSTED_PROXY_HOPS", "0")), 0)
 SECRET_KEY = os.getenv("SECRET_KEY")
+ENVIRONMENT = os.getenv("ENVIRONMENT", "").strip().lower()
+IS_PRODUCTION = ENVIRONMENT == "production"
 if not SECRET_KEY:
-    if os.getenv("ENVIRONMENT") == "production":
-        import secrets
-        SECRET_KEY = secrets.token_hex(32)
-        logger.warning("SECRET_KEY not set in production. Generated temporary key.")
-    else:
-        SECRET_KEY = "dev-secret-key"
-        if os.getenv("ENVIRONMENT") == "production":
-            logger.warning("Using default SECRET_KEY in development mode (or missing in prod)")
-        else:
-            logger.info("Using default SECRET_KEY in development")
+    if IS_PRODUCTION:
+        raise RuntimeError("SECRET_KEY must be set in production.")
+    SECRET_KEY = secrets.token_hex(32)
+    logger.warning("SECRET_KEY not set. Generated ephemeral development key.")
 SESSION_CLEANUP_AGE_SECONDS = 86400
 
 
@@ -101,7 +102,13 @@ app.secret_key = SECRET_KEY
 app.config.update(
     MAX_CONTENT_LENGTH=MAX_UPLOAD_BYTES,
     SESSION_TYPE="filesystem",
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE=os.getenv("SESSION_COOKIE_SAMESITE", "Lax"),
+    SESSION_COOKIE_SECURE=IS_PRODUCTION,
+    PERMANENT_SESSION_LIFETIME=int(os.getenv("PERMANENT_SESSION_LIFETIME_SECONDS", "259200")),
 )
+if TRUSTED_PROXY_HOPS > 0:
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=TRUSTED_PROXY_HOPS, x_proto=TRUSTED_PROXY_HOPS, x_host=TRUSTED_PROXY_HOPS)
 
 
 
@@ -160,20 +167,36 @@ def _strip_leading_number(text: str) -> str:
     return re.sub(r"^\s*(?:\d{1,3}[).:\-]|[A-E][).:\-])\s*", "", text).strip()
 
 def _get_client_ip():
-    """Reliably get the client's real IP address, handling proxies."""
+    """Get client IP while only trusting forwarding headers via ProxyFix."""
     if not request: return "0.0.0.0"
-    
-    # Check X-Forwarded-For first (standard for proxies)
-    x_forwarded = request.headers.get("X-Forwarded-For")
-    if x_forwarded:
-        # The first IP in the list is the original client
-        return x_forwarded.split(",")[0].strip()
-    
-    # Fallback to other headers if needed, or remote_addr
-    return request.headers.get("X-Real-IP", request.remote_addr)
+    return request.remote_addr or "0.0.0.0"
+
+def _safe_log_value(value: Any) -> str:
+    text = str(value if value is not None else "")
+    return re.sub(r"[\r\n\t]+", " ", text)[:512]
+
+def _get_csrf_token() -> str:
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+def _require_csrf():
+    token = request.headers.get("X-CSRF-Token", "")
+    expected = session.get("csrf_token")
+    if not expected or not token or token != expected:
+        abort(403, "CSRF validation failed")
+    origin = request.headers.get("Origin")
+    if origin:
+        trusted_origin = f"{request.scheme}://{request.host}"
+        if origin != trusted_origin:
+            abort(403, "Invalid request origin")
 
 @app.before_request
 def track_active_user():
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.path.startswith("/api/"):
+        _require_csrf()
     try:
         # Use valid IP extraction
         ip = _get_client_ip()
@@ -186,7 +209,7 @@ def track_active_user():
                 cursor = conn.execute("SELECT last_seen FROM active_users WHERE ip = ?", (ip,))
                 row = cursor.fetchone()
                 if not row:
-                    logger.info(f"NEW USER ARRIVED: {ip} | UA: {ua}")
+                    logger.info(f"NEW USER ARRIVED: {_safe_log_value(ip)} | UA: {_safe_log_value(ua)}")
                 
                 conn.execute("INSERT OR REPLACE INTO active_users (ip, ua, last_seen) VALUES (?, ?, ?)",
                              (ip, ua, now))
@@ -213,7 +236,7 @@ def _json_generic_error(exc: Exception):
         return _json_http_error(exc)
     if request.path.startswith("/api/"):
         app.logger.exception("Unhandled error during API request")
-        return jsonify({"error": "Internal Server Error", "description": str(exc)}), 500
+        return jsonify({"error": "Internal Server Error", "description": "An unexpected error occurred."}), 500
     raise exc
 
 def _looks_like_header_line(text: str) -> bool:
@@ -366,6 +389,8 @@ def _extract_clean_lines(source: Path | IO[bytes]) -> List[str]:
             path_for_worker = None # Worker uses source_path_arg
             
         num_pages = len(reader.pages)
+        if num_pages > MAX_PDF_PAGES:
+            raise ValueError(f"PDF has {num_pages} pages; maximum allowed is {MAX_PDF_PAGES}.")
         lines = []
         
         # Determine strict header threshold first?
@@ -388,7 +413,7 @@ def _extract_clean_lines(source: Path | IO[bytes]) -> List[str]:
                 
             for future in futures:
                 try:
-                    page_lines = future.result()
+                    page_lines = future.result(timeout=PDF_PAGE_TIMEOUT_SECONDS)
                     lines.extend(page_lines)
                 except Exception as e:
                     logger.error(f"Page processing error: {e}")
@@ -2015,6 +2040,39 @@ def _load_session_data(sid: str) -> Dict[str, Any]:
 def _save_session_data(sid: str, data: Dict[str, Any]):
     _save_session_data_db(sid, data)
 
+def _track_started_quiz(sid: str, test_id: str, question_ids: List[str]):
+    data = _load_session_data(sid)
+    quiz_access = data.setdefault("quiz_access", {})
+    quiz_access[test_id] = {
+        "questions": question_ids,
+        "attempted": [],
+        "revealed": [],
+        "updated_at": time.time(),
+    }
+    _save_session_data(sid, data)
+
+def _mark_attempted_question(sid: str, test_id: str, question_id: str):
+    data = _load_session_data(sid)
+    quiz_access = data.setdefault("quiz_access", {}).setdefault(test_id, {"questions": [], "attempted": [], "revealed": [], "updated_at": time.time()})
+    if question_id not in quiz_access.get("attempted", []):
+        quiz_access["attempted"].append(question_id)
+    if question_id not in quiz_access.get("revealed", []):
+        quiz_access["revealed"].append(question_id)
+    quiz_access["updated_at"] = time.time()
+    _save_session_data(sid, data)
+
+def _question_allowed_for_session(sid: str, test_id: str, question_id: str) -> bool:
+    data = _load_session_data(sid)
+    quiz_access = data.get("quiz_access", {}).get(test_id, {})
+    questions = set(quiz_access.get("questions", []))
+    return question_id in questions
+
+def _answer_revealed_for_session(sid: str, test_id: str, question_id: str) -> bool:
+    data = _load_session_data(sid)
+    quiz_access = data.get("quiz_access", {}).get(test_id, {})
+    revealed = set(quiz_access.get("revealed", []))
+    return question_id in revealed
+
 def _cleanup_old_sessions():
     """Delete sessions and files older than 7 days"""
     try:
@@ -2084,7 +2142,27 @@ _STATIC_TESTS_CACHE = {}
 def home():
     sid = _get_session_id()
     _load_session_data(sid)
-    return render_template("index.html", default_random_order=DEFAULT_RANDOM_ORDER)
+    csrf_token = _get_csrf_token()
+    nonce = secrets.token_urlsafe(16)
+    csp = (
+        "default-src 'self'; "
+        f"script-src 'self' 'nonce-{nonce}' https://unpkg.com https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com data:; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "object-src 'none'"
+    )
+    response = app.make_response(render_template("index.html", default_random_order=DEFAULT_RANDOM_ORDER, csrf_token=csrf_token, csp_nonce=nonce))
+    response.headers["Content-Security-Policy"] = csp
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if IS_PRODUCTION:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
 @app.route("/settings")
 def settings():
@@ -2136,7 +2214,7 @@ def start_quiz(test_id):
     
     # Log activity
     ip = _get_client_ip()
-    logger.info(f"TEST STARTED: {test_id} | Mode: {mode} | IP: {ip}")
+    logger.info(f"TEST STARTED: {_safe_log_value(test_id)} | Mode: {_safe_log_value(mode)} | IP: {_safe_log_value(ip)}")
 
     count = payload.get("count")
     
@@ -2162,6 +2240,8 @@ def start_quiz(test_id):
         
 
     sanitized_questions = _sanitize_questions(questions)
+    sid = _get_session_id()
+    _track_started_quiz(sid, test_id, [q["id"] for q in questions])
 
     return jsonify({
         "test": {"id": test["id"], "name": test["name"], "total": len(test["questions"])},
@@ -2176,11 +2256,20 @@ def upload_pdf():
     f = request.files.get("file")
     if not f: abort(400, "No file")
 
-    logger.info(f"TEST UPLOADED: {f.filename} | IP: {_get_client_ip()}")
+    safe_filename = _safe_log_value(f.filename)
+    logger.info(f"TEST UPLOADED: {safe_filename} | IP: {_safe_log_value(_get_client_ip())}")
     
     raw = f.read()
     if len(raw) > MAX_UPLOAD_BYTES:
         abort(413, "Too large")
+    try:
+        reader = PdfReader(io.BytesIO(raw))
+        if len(reader.pages) > MAX_PDF_PAGES:
+            abort(413, f"PDF has too many pages (max {MAX_PDF_PAGES}).")
+    except HTTPException:
+        raise
+    except Exception:
+        abort(400, "Invalid PDF file")
         
     parsed = _parse_pdf_source(io.BytesIO(raw), f.filename.replace(".pdf", ""))
     if not parsed or not parsed.get("questions"):
@@ -2217,12 +2306,16 @@ def check_answer(test_id, question_id):
     
     q = next((x for x in test["questions"] if x["id"] == question_id), None)
     if not q: abort(404, "Question not found")
+    sid = _get_session_id()
+    if not _question_allowed_for_session(sid, test_id, question_id):
+        abort(403, "Question not available in current quiz session")
     
     if not request.json: abort(400, "JSON body required")
     choice = request.json.get("choice")
     if choice is None: abort(400, "Choice required")
     
     is_correct = (choice == q["correct_index"])
+    _mark_attempted_question(sid, test_id, question_id)
     return jsonify({"correct": is_correct})
 
 @app.route("/api/tests/<test_id>/results", methods=["POST"])
@@ -2252,6 +2345,11 @@ def get_answer_details(test_id, question_id):
     if not test: abort(404)
     q = next((x for x in test["questions"] if x["id"] == question_id), None)
     if not q: abort(404)
+    sid = _get_session_id()
+    if not _question_allowed_for_session(sid, test_id, question_id):
+        abort(403, "Question not available in current quiz session")
+    if not _answer_revealed_for_session(sid, test_id, question_id):
+        abort(403, "Answer not yet available for this question")
     
     return jsonify({
         "correct_index": q["correct_index"],
@@ -2273,8 +2371,17 @@ def handle_generic_exception(e):
     app.logger.error(f"Unhandled exception: {e}", exc_info=True)
     return jsonify({
         "error": "Internal Server Error",
-        "message": str(e),
+        "message": "An unexpected server error occurred.",
     }), 500
+
+@app.after_request
+def apply_security_headers(response):
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    if IS_PRODUCTION:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))

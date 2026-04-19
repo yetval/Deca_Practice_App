@@ -36,6 +36,7 @@ const state = {
 };
 
 const RANDOM_KEY = "deca-random-order";
+const CSRF_META_SELECTOR = 'meta[name="csrf-token"]';
 
 function parseDefaultRandom() {
     if (typeof window !== "undefined" && typeof window.DEFAULT_RANDOM_ORDER !== "undefined") {
@@ -106,6 +107,23 @@ function escapeHtml(str) {
 
 function tidyText(str) {
     return (str || "").replace(/\s+/g, " ").trim();
+}
+
+function getCsrfToken() {
+    return document.querySelector(CSRF_META_SELECTOR)?.getAttribute("content") || "";
+}
+
+async function apiFetch(url, options = {}) {
+    const opts = { ...options };
+    opts.credentials = "same-origin";
+    const method = String(opts.method || "GET").toUpperCase();
+    const headers = new Headers(opts.headers || {});
+    if (method !== "GET" && method !== "HEAD") {
+        const token = getCsrfToken();
+        if (token) headers.set("X-CSRF-Token", token);
+    }
+    opts.headers = headers;
+    return fetch(url, opts);
 }
 
 function applyThemeFromStorage() {
@@ -267,6 +285,16 @@ function setupEventListeners() {
             updateTimerDisplay();
         });
     }
+
+    document.getElementById("open-credits-btn")?.addEventListener("click", () => openCredits());
+    document.getElementById("open-history-btn")?.addEventListener("click", () => openHistory());
+    document.getElementById("open-settings-btn")?.addEventListener("click", () => openSettings());
+    document.getElementById("close-settings-btn")?.addEventListener("click", () => closeSettings());
+    document.getElementById("close-history-btn")?.addEventListener("click", () => closeHistory());
+    document.getElementById("clear-history-btn")?.addEventListener("click", () => clearHistory());
+    document.querySelectorAll(".close-credits-btn").forEach((btn) => {
+        btn.addEventListener("click", () => closeCredits());
+    });
 }
 
 function init() {
@@ -311,7 +339,7 @@ async function fetchTests(options = {}) {
         // 1. Load from Server
         try {
             const url = options.reload ? "/api/tests?reload=1" : "/api/tests";
-            const res = await fetch(url, { credentials: "same-origin" });
+            const res = await apiFetch(url);
             if (res.ok) {
                 const list = await res.json();
                 if (Array.isArray(list)) {
@@ -386,10 +414,9 @@ async function handleUpload() {
     uploadBtn.disabled = true;
 
     try {
-        const res = await fetch("/api/upload_pdf", {
+        const res = await apiFetch("/api/upload_pdf", {
             method: "POST",
             body: formData,
-            credentials: "same-origin",
         });
 
         const rawText = await res.text().catch(() => "");
@@ -809,12 +836,11 @@ async function persistResults() {
     });
     state.lastResults = results;
     try {
-        const res = await fetch(
+        const res = await apiFetch(
             `/api/tests/${encodeURIComponent(state.activeTest.id)}/results`,
             {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                credentials: "same-origin",
                 body: JSON.stringify({ results }),
             }
         );
@@ -832,6 +858,9 @@ async function ensureAnswerDetails(question) {
     if (existing.correctIndex !== undefined && existing.explanation !== undefined) {
         return existing;
     }
+    if (existing.choice === undefined && !existing.revealed) {
+        return existing;
+    }
     const sourceTestId = getSourceTestId(question);
     const q = state.questions.find((item) => item.id === question.id);
     if ((state.isLocalActive || (q && typeof q.correct_index === "number")) && q) {
@@ -845,9 +874,9 @@ async function ensureAnswerDetails(question) {
         return mergedLocal;
     }
     if (!sourceTestId) throw new Error("Missing test id for answer lookup");
-    const res = await fetch(
+    const res = await apiFetch(
         `/api/tests/${encodeURIComponent(sourceTestId)}/answer/${encodeURIComponent(question.id)}`,
-        { credentials: "same-origin" }
+        {}
     );
     if (!res.ok) throw new Error("Unable to load answer details");
     const data = await res.json();
@@ -998,7 +1027,7 @@ function renderTestList() {
       <div class="test-actions">
         <label>
           <span class="muted small-label">Count</span>
-          <select class="count-select" data-test-id="${test.id}">
+          <select class="count-select">
             ${options
                 .map((opt) => `<option value="${opt.value}">${opt.value === 0 ? "All" : opt.label}</option>`)
                 .join("")}
@@ -1006,15 +1035,15 @@ function renderTestList() {
         </label>
         <label style="${localStorage.getItem("deca-timer-disabled") === "true" ? "display:none" : ""}">
           <span class="muted small-label">Time Limit</span>
-          <input type="number" class="time-select" data-test-id="${test.id}" min="1" step="1" placeholder="Mins">
+          <input type="number" class="time-select" min="1" step="1" placeholder="Mins">
         </label>
-        <button class="primary" data-test-id="${test.id}">
+        <button class="primary">
           <i class="ph ph-play"></i> Start
         </button>
-        <button class="secondary exam-btn" data-test-id="${test.id}" title="Simulate Exam (No feedback, strict timer)">
+        <button class="secondary exam-btn" title="Simulate Exam (No feedback, strict timer)">
           <i class="ph ph-graduation-cap"></i> Exam
         </button>
-        <button class="ghost delete-btn" data-test-id="${test.id}" title="Remove from list">
+        <button class="ghost delete-btn" title="Remove from list">
           <i class="ph ph-trash"></i>
         </button>
       </div>
@@ -1112,10 +1141,9 @@ async function startTest(testId, count = 0, mode = "regular", timeLimitMinutes =
         let data = null;
         let usedLocal = false;
         try {
-            const res = await fetch(`/api/tests/${encodeURIComponent(testId)}/start_quiz`, {
+            const res = await apiFetch(`/api/tests/${encodeURIComponent(testId)}/start_quiz`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                credentials: "same-origin",
                 body: JSON.stringify(payload),
             });
             const bodyText = await res.text();
@@ -1194,8 +1222,9 @@ async function startTest(testId, count = 0, mode = "regular", timeLimitMinutes =
         <h3>Error Loading Test</h3>
         <p class="muted">${escapeHtml(err.message || "Unable to load test")}</p>
         <p class="small" style="margin-top:10px; color: var(--text-muted);">${helpText}</p>
-        <button onclick="fetchTests()" class="secondary" style="margin-top:16px"><i class="ph ph-arrows-clockwise"></i> Reload List</button>
+        <button id="reload-tests-from-error" class="secondary" style="margin-top:16px"><i class="ph ph-arrows-clockwise"></i> Reload List</button>
       </div>`;
+        document.getElementById("reload-tests-from-error")?.addEventListener("click", () => fetchTests());
     }
 }
 
@@ -1465,7 +1494,7 @@ function renderQuestionCard() {
                     return `<button class="option-btn ${isStruck ? "striked" : ""}" data-idx="${idx}" ${disableOptions ? "disabled" : ""}>
               <span class="kbd-hint">${letters[idx] || (idx + 1)}</span>
               <strong>${String.fromCharCode(65 + idx)}.</strong> ${escapeHtml(tidyText(option))}
-              <div class="strike-toggle" onclick="toggleStrike(event, ${idx}, '${question.id}')" title="Strike out answer">
+              <div class="strike-toggle" data-strike-idx="${idx}" title="Strike out answer">
                  <i class="ph ph-eye-slash"></i>
               </div>
             </button>`;
@@ -1542,6 +1571,10 @@ function renderQuestionCard() {
                 btn.classList.add("correct-highlight");
             }
         }
+    });
+    questionArea.querySelectorAll(".strike-toggle").forEach((el) => {
+        const idx = Number(el.dataset.strikeIdx);
+        el.addEventListener("click", (e) => toggleStrike(e, idx, question.id));
     });
 
     if (status && (status.revealed || status.correct !== undefined)) {
@@ -1650,12 +1683,11 @@ async function handleAnswer(question, choiceIndex, isTimerExpiry = false) {
         } else {
             // ... server check ...
             if (!sourceTestId) throw new Error("Missing test id for answer lookup");
-            const res = await fetch(
+            const res = await apiFetch(
                 `/api/tests/${encodeURIComponent(sourceTestId)}/check/${encodeURIComponent(question.id)}`,
                 {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    credentials: "same-origin",
                     body: JSON.stringify({ choice: choiceIndex }),
                 }
             );
@@ -1663,9 +1695,9 @@ async function handleAnswer(question, choiceIndex, isTimerExpiry = false) {
             const data = await res.json();
             isCorrect = Boolean(data.correct);
 
-            const detailsRes = await fetch(
+            const detailsRes = await apiFetch(
                 `/api/tests/${encodeURIComponent(sourceTestId)}/answer/${encodeURIComponent(question.id)}`,
-                { credentials: "same-origin" }
+                {}
             );
             if (detailsRes.ok) {
                 details = await detailsRes.json();
@@ -1854,7 +1886,7 @@ async function showSummary(forceShowExplanations) {
             const timeTaken = state.perQuestionMs[q.id] || 0;
             const explanationHtml =
                 showExplanation && status.explanation !== undefined
-                    ? `<div class="explanation"><strong>Correct (${status.correct_letter || status.correctLetter || "?"}):</strong> ${escapeHtml(
+                    ? `<div class="explanation"><strong>Correct (${escapeHtml(String(status.correct_letter || status.correctLetter || "?"))}):</strong> ${escapeHtml(
                         tidyText(status.explanation || "No explanation provided.")
                     )}<br><span class="muted">Time: ${formatMs(timeTaken)}</span></div>`
                     : `<div class="explanation muted">Time: ${formatMs(timeTaken)}</div>`;
@@ -1880,7 +1912,7 @@ function renderExplanation(question, status) {
     const el = document.getElementById("explanation");
     if (!el || !status.explanation) return;
     el.innerHTML = `
-    <strong>Correct Answer: ${status.correct_letter || status.correctLetter}</strong><br>
+    <strong>Correct Answer: ${escapeHtml(String(status.correct_letter || status.correctLetter || "?"))}</strong><br>
     ${escapeHtml(tidyText(status.explanation))}
   `;
     el.classList.remove("hidden");
@@ -2038,10 +2070,9 @@ async function startSmartReview() {
         const targetIds = new Set(byTest[testId]);
 
         try {
-            const res = await fetch(`/api/tests/${encodeURIComponent(testId)}/start_quiz`, {
+            const res = await apiFetch(`/api/tests/${encodeURIComponent(testId)}/start_quiz`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                credentials: "same-origin",
                 body: JSON.stringify({ count: 9999, mode: "regular" }),
             });
 
@@ -2266,9 +2297,9 @@ function renderHistory() {
 
     let html = "";
     cleanHistory.forEach(h => {
-        const dateStr = new Date(h.timestamp).toLocaleString();
-        const score = h.score || 0;
-        const total = h.total || 0;
+        const dateStr = escapeHtml(new Date(h.timestamp).toLocaleString());
+        const score = Number.isFinite(Number(h.score)) ? Number(h.score) : 0;
+        const total = Number.isFinite(Number(h.total)) ? Number(h.total) : 0;
         const pct = total > 0 ? Math.round((score / total) * 100) : 0;
         const testName = escapeHtml(h.testName || "Unknown Test");
 

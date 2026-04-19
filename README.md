@@ -55,7 +55,7 @@ Simply place your PDF files in the `tests/` directory. The app automatically det
     docker run -p 8080:8080 deca-practice
     ```
 *   **Environment Variables**:
-    *   `SECRET_KEY`: Auto-generated if missing (safe for production).
+    *   `SECRET_KEY`: Required in production.
     *   `PORT`: Defaults to 8080.
 
 ### Credits
@@ -67,4 +67,3 @@ Built with ❤️ for DECA students.
 ## License
 
 This project is licensed under the [GNU General Public License v3.0](LICENSE).
-
